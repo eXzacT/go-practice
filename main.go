@@ -2,10 +2,10 @@ package main
 
 import (
 	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/eXzacT/go-practice/internal/database"
 	"github.com/go-chi/chi"
@@ -22,23 +22,24 @@ type apiConfig struct {
 func main() {
 	godotenv.Load(".env")
 
-	portString := os.Getenv("PORT")
-	if portString == "" {
-		log.Fatal("PORT is not bound in the .env file")
+	port := os.Getenv("PORT")
+	if port == "" {
+		log.Fatal("PORT env. variable is not set")
 	}
 
-	dbURL := os.Getenv("DB_URL")
+	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		log.Fatal("DB_URL is not bound in the .env file")
+		log.Fatal("DATABASE_URL env. variable is not set")
 	}
 
-	conn, err := sql.Open("postgres", dbURL)
+	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatal("Can't connect to the database:", err)
+		log.Fatal(err)
 	}
+	dbQueries := database.New(db)
 
 	apiCfg := apiConfig{
-		DB: database.New(conn),
+		DB: dbQueries,
 	}
 
 	router := chi.NewRouter()
@@ -53,24 +54,32 @@ func main() {
 	}))
 
 	v1Router := chi.NewRouter()
+
+	v1Router.Post("/users", apiCfg.handlerUsersCreate)
+	v1Router.Get("/users", apiCfg.middlewareAuth(apiCfg.handlerUsersGet))
+
+	v1Router.Post("/feeds", apiCfg.middlewareAuth(apiCfg.handlerFeedCreate))
+	v1Router.Get("/feeds", apiCfg.handlerGetFeeds)
+
+	v1Router.Get("/feed_follows", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowsGet))
+	v1Router.Post("/feed_follows", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowCreate))
+	v1Router.Delete("/feed_follows/{feedFollowID}", apiCfg.middlewareAuth(apiCfg.handlerFeedFollowDelete))
+
+	v1Router.Get("/posts", apiCfg.middlewareAuth(apiCfg.handlerPostsGet))
+
 	v1Router.Get("/healthz", handlerReadiness)
-	v1Router.Get("/error", handleErr)
-	v1Router.Post("/users", apiCfg.handlerCreateUser)
-	v1Router.Get("/users", apiCfg.middlewareAuth(apiCfg.handlerGetUser))
-	v1Router.Post("/feeds", apiCfg.middlewareAuth(apiCfg.handlerCreateFeed))
+	v1Router.Get("/err", handlerErr)
 
 	router.Mount("/v1", v1Router)
-
 	srv := &http.Server{
+		Addr:    ":" + port,
 		Handler: router,
-		Addr:    ":" + portString,
 	}
 
-	log.Printf("Server starting on port %v", portString)
-	err = srv.ListenAndServe()
-	if err != nil {
-		log.Fatal(err)
-	}
+	const collectionConcurrency = 10
+	const collectionInterval = time.Minute
+	go startScraping(dbQueries, collectionConcurrency, collectionInterval)
 
-	fmt.Println("Port:", portString)
+	log.Printf("Serving on port: %s\n", port)
+	log.Fatal(srv.ListenAndServe())
 }
